@@ -1,7 +1,7 @@
 """
 Dashboard Streamlit — Pilotage Juste Prescription ECBU
-v2 : tendances temporelles, analyse par service, indicateurs de sécurité,
-     alertes ASB, qualité prélèvement, credentials .env.
+v3 : visualisations Plotly, code couleur par décision, heatmap, donut charts,
+     tableaux conditionnels, export PDF.
 
 Lancement :
     python -m streamlit run dashboard.py
@@ -11,10 +11,31 @@ import os
 from datetime import datetime
 from io import BytesIO
 
-import streamlit as st
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
 from fpdf import FPDF
 from sqlalchemy import create_engine
+
+# =============================================================================
+# PALETTE — couleurs par décision clinique
+# =============================================================================
+COULEURS_DECISION = {
+    "POSITIF":   "#2ecc71",   # vert
+    "NÉGATIF":   "#95a5a6",   # gris
+    "REJET":     "#e67e22",   # orange
+    "ALERTE":    "#e74c3c",   # rouge
+    "TRAITEMENT":"#3498db",   # bleu
+}
+
+def couleur_decision(libelle: str) -> str:
+    """Retourne la couleur associée à un libellé de décision."""
+    for cle, couleur in COULEURS_DECISION.items():
+        if cle in str(libelle).upper():
+            return couleur
+    return "#bdc3c7"
+
 
 # =============================================================================
 # EXPORT PDF
@@ -51,18 +72,17 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
     pdf.set_margins(15, 18, 15)
     pdf.add_page()
 
-    # ---- Section KPIs ----
+    # ---- KPIs ----
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 7, "Indicateurs cles", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
-
     kpi_rows = [
-        ("Total ECBU analyses",        str(kpis["total"])),
-        ("Positifs",                   str(kpis["nb_positif"])),
-        ("Negatifs",                   str(kpis["nb_negatif"])),
-        ("Rejets (contamination)",     str(kpis["nb_rejet"])),
-        ("Alertes cliniques",          str(kpis["nb_alerte"])),
-        ("Taux de non-pertinence",     f"{kpis['taux_np']:.1f}%"),
+        ("Total ECBU analyses",    str(kpis["total"])),
+        ("Positifs",               str(kpis["nb_positif"])),
+        ("Negatifs",               str(kpis["nb_negatif"])),
+        ("Rejets (contamination)", str(kpis["nb_rejet"])),
+        ("Alertes cliniques",      str(kpis["nb_alerte"])),
+        ("Taux de non-pertinence", f"{kpis['taux_np']:.1f}%"),
     ]
     cw = [110, 55]
     pdf.set_font("Helvetica", "B", 8)
@@ -75,23 +95,19 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
         pdf.set_fill_color(245, 249, 255) if fill else pdf.set_fill_color(255, 255, 255)
         pdf.cell(cw[0], 5, label, border=1, fill=fill)
         pdf.cell(cw[1], 5, val,   border=1, fill=fill, new_x="LMARGIN", new_y="NEXT")
-
     pdf.ln(6)
 
-    # ---- Section par service ----
+    # ---- Par service ----
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 7, "Statistiques par service", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
-
     cols_svc   = ["Service", "Total ECBU", "Positifs", "Non pertinents", "Taux NP (%)"]
     widths_svc = [55, 26, 26, 36, 26]
-
     pdf.set_font("Helvetica", "B", 8)
     pdf.set_fill_color(220, 235, 255)
     for col, w in zip(cols_svc, widths_svc):
         pdf.cell(w, 6, col, border=1, fill=True, align="C")
     pdf.ln()
-
     pdf.set_font("Helvetica", "", 8)
     for idx, row in enumerate(df_svc[cols_svc].itertuples(index=False)):
         fill = idx % 2 == 0
@@ -99,7 +115,6 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
         for val, w in zip(row, widths_svc):
             pdf.cell(w, 5, str(val), border=1, fill=fill, align="C")
         pdf.ln()
-
     pdf.ln(4)
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(120, 120, 120)
@@ -108,15 +123,16 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
              f"Periode : {df_f['Date Prelevement'].min() if 'Date Prelevement' in df_f else 'N/A'}"
              f" - {df_f['Date Prelevement'].max() if 'Date Prelevement' in df_f else 'N/A'}",
              new_x="LMARGIN", new_y="NEXT")
-
     buf = BytesIO()
     buf.write(bytes(pdf.output()))
     return buf.getvalue()
 
 
 # =============================================================================
+# CONNEXION
+# =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(SCRIPT_DIR, '.env')
+ENV_PATH = os.path.join(SCRIPT_DIR, ".env")
 
 try:
     from dotenv import load_dotenv
@@ -124,26 +140,27 @@ try:
 except ImportError:
     pass
 
-# =============================================================================
-# CONFIG
-# =============================================================================
-st.set_page_config(page_title="Pilotage ECBU — Avicenne", page_icon="🏥", layout="wide")
+st.set_page_config(
+    page_title="Pilotage ECBU — Avicenne",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASS = os.getenv('DB_PASS', '')
-DB_HOST = os.getenv('DB_HOST', 'localhost')
-DB_PORT = os.getenv('DB_PORT', '5432')
-DB_NAME = os.getenv('DB_NAME', 'postgres')
+DB_USER = os.getenv("DB_USER", "postgres")
+DB_PASS = os.getenv("DB_PASS", "")
+DB_HOST = os.getenv("DB_HOST", "localhost")
+DB_PORT = os.getenv("DB_PORT", "5432")
+DB_NAME = os.getenv("DB_NAME", "postgres")
+
 
 @st.cache_resource
 def init_connection():
     return create_engine(
-        f'postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}'
+        f"postgresql+psycopg2://{DB_USER}:{DB_PASS}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
 
-# =============================================================================
-# CHARGEMENT
-# =============================================================================
+
 try:
     engine = init_connection()
     df = pd.read_sql("SELECT * FROM v_algo_avicenne", engine)
@@ -153,95 +170,76 @@ except Exception as e:
     st.stop()
 
 if df.empty:
-    st.warning("Aucune donnée dans la vue v_algo_avicenne. Exécutez analyse_ecbu.py d'abord.")
+    st.warning("Aucune donnée dans v_algo_avicenne. Exécutez analyse_ecbu.py d'abord.")
     st.stop()
+
+col_dec = "Décision Algorithme"
 
 # =============================================================================
 # SIDEBAR — FILTRES
 # =============================================================================
 st.sidebar.header("🔍 Filtres")
 
-# Services
-services = sorted(df['Service'].unique())
+services   = sorted(df["Service"].unique())
 choix_services = st.sidebar.multiselect("Service(s)", services, default=services)
 
-# Sexe
-sexes = sorted(df['Sexe'].unique())
+sexes = sorted(df["Sexe"].unique())
 choix_sexe = st.sidebar.multiselect("Sexe", sexes, default=sexes)
 
-# Tranche d'âge
-age_min, age_max = int(df['Age'].min()), int(df['Age'].max())
+age_min, age_max = int(df["Age"].min()), int(df["Age"].max())
 choix_age = st.sidebar.slider("Tranche d'âge", age_min, age_max, (age_min, age_max))
 
-# Symptomatique
-choix_sympt = st.sidebar.multiselect("Symptomatique ?", ['Oui', 'Non'], default=['Oui', 'Non'])
+choix_sympt = st.sidebar.multiselect(
+    "Symptomatique ?", ["Oui", "Non"], default=["Oui", "Non"]
+)
 
-# Application des filtres
 mask = (
-    df['Service'].isin(choix_services)
-    & df['Sexe'].isin(choix_sexe)
-    & df['Age'].between(choix_age[0], choix_age[1])
-    & df['Symptomatique'].isin(choix_sympt)
+    df["Service"].isin(choix_services)
+    & df["Sexe"].isin(choix_sexe)
+    & df["Age"].between(choix_age[0], choix_age[1])
+    & df["Symptomatique"].isin(choix_sympt)
 )
 df_f = df[mask].copy()
 
 # =============================================================================
-# EN-TÊTE
+# KPIs
 # =============================================================================
-st.title("🏥 Pilotage Juste Prescription ECBU — Avicenne")
-st.caption(f"{len(df_f)} ECBU affichés sur {len(df)} au total")
-
-# =============================================================================
-# KPIs PRINCIPAUX
-# =============================================================================
-total = len(df_f)
-col_dec = "Décision Algorithme"
-
-nb_positif = df_f[col_dec].str.contains('POSITIF', case=False, na=False).sum()
-nb_negatif = df_f[col_dec].str.contains('NÉGATIF', case=False, na=False).sum()
-nb_rejet   = df_f[col_dec].str.contains('REJET', case=False, na=False).sum()
-nb_alerte  = df_f[col_dec].str.contains('ALERTE', case=False, na=False).sum()
-nb_np = nb_negatif + nb_rejet
-taux_np = nb_np / total * 100 if total > 0 else 0
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Total", total)
-c2.metric("Positifs", nb_positif)
-c3.metric("Négatifs", nb_negatif)
-c4.metric("Rejets", nb_rejet, help="Contamination / flore polymorphe")
-c5.metric("Taux non-pertinence", f"{taux_np:.1f}%", delta=f"{nb_np} ECBU",
-          delta_color="inverse")
-
-st.divider()
+total      = len(df_f)
+nb_positif = df_f[col_dec].str.contains("POSITIF",  case=False, na=False).sum()
+nb_negatif = df_f[col_dec].str.contains("NÉGATIF",  case=False, na=False).sum()
+nb_rejet   = df_f[col_dec].str.contains("REJET",    case=False, na=False).sum()
+nb_alerte  = df_f[col_dec].str.contains("ALERTE",   case=False, na=False).sum()
+nb_np      = nb_negatif + nb_rejet
+taux_np    = nb_np / total * 100 if total > 0 else 0
 
 # =============================================================================
-# STATS PAR SERVICE (calculées ici pour les onglets et le PDF)
+# STATS PAR SERVICE
 # =============================================================================
 stats_service = []
-for svc in sorted(df_f['Service'].unique()):
-    sub = df_f[df_f['Service'] == svc]
-    n = len(sub)
-    n_np  = sub[col_dec].str.contains('NÉGATIF|REJET', case=False, na=False).sum()
-    n_pos = sub[col_dec].str.contains('POSITIF', case=False, na=False).sum()
-    n_asympt = (sub['Symptomatique'] == 'Non').sum()
+for svc in sorted(df_f["Service"].unique()):
+    sub = df_f[df_f["Service"] == svc]
+    n        = len(sub)
+    n_np     = sub[col_dec].str.contains("NÉGATIF|REJET", case=False, na=False).sum()
+    n_pos    = sub[col_dec].str.contains("POSITIF",       case=False, na=False).sum()
+    n_asympt = (sub["Symptomatique"] == "Non").sum()
     stats_service.append({
-        'Service':            svc,
-        'Total ECBU':         n,
-        'Positifs':           n_pos,
-        'Non pertinents':     n_np,
-        'Taux NP (%)':        round(n_np / n * 100, 1) if n > 0 else 0,
-        'Asymptomatiques':    n_asympt,
-        '% Asymptomatiques':  round(n_asympt / n * 100, 1) if n > 0 else 0,
+        "Service":           svc,
+        "Total ECBU":        n,
+        "Positifs":          n_pos,
+        "Non pertinents":    n_np,
+        "Taux NP (%)":       round(n_np / n * 100, 1) if n > 0 else 0,
+        "Asymptomatiques":   n_asympt,
+        "% Asymptomatiques": round(n_asympt / n * 100, 1) if n > 0 else 0,
     })
-df_svc = pd.DataFrame(stats_service).sort_values('Taux NP (%)', ascending=False)
+df_svc = pd.DataFrame(stats_service).sort_values("Taux NP (%)", ascending=False)
 
-# ---- Bouton PDF dans la sidebar ----
+# ---- Bouton PDF ----
 st.sidebar.divider()
 st.sidebar.subheader("Export PDF")
 if st.sidebar.button("Générer rapport PDF"):
     kpis = {
-        'total': total, 'nb_positif': nb_positif, 'nb_negatif': nb_negatif,
-        'nb_rejet': nb_rejet, 'nb_alerte': nb_alerte, 'taux_np': taux_np,
+        "total": total, "nb_positif": nb_positif, "nb_negatif": nb_negatif,
+        "nb_rejet": nb_rejet, "nb_alerte": nb_alerte, "taux_np": taux_np,
     }
     pdf_bytes = generer_rapport_pdf(df_f, kpis, df_svc)
     st.sidebar.download_button(
@@ -252,6 +250,24 @@ if st.sidebar.button("Générer rapport PDF"):
     )
 
 # =============================================================================
+# EN-TÊTE
+# =============================================================================
+st.title("🏥 Pilotage Juste Prescription ECBU — Avicenne")
+st.caption(f"{len(df_f)} ECBU affichés sur {len(df)} au total")
+
+# ---- Barre de KPIs ----
+c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1.metric("Total",            total)
+c2.metric("Positifs",         nb_positif,  delta=f"{nb_positif/total*100:.0f}%" if total else None)
+c3.metric("Négatifs",         nb_negatif)
+c4.metric("Rejets",           nb_rejet,    help="Contamination / flore polymorphe")
+c5.metric("Alertes",          nb_alerte,   help="Infections décapitées, cas critiques")
+c6.metric("Taux non-pertinence", f"{taux_np:.1f}%",
+          delta=f"{nb_np} ECBU", delta_color="inverse")
+
+st.divider()
+
+# =============================================================================
 # ONGLETS
 # =============================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -259,115 +275,311 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📈 Tendances",
     "🏥 Par service",
     "⚠️ Sécurité & Alertes",
-    "📋 Données brutes"
+    "📋 Données brutes",
 ])
 
-# ---- TAB 1 : VUE D'ENSEMBLE ----
+# ---------------------------------------------------------------------------
+# TAB 1 — VUE D'ENSEMBLE
+# ---------------------------------------------------------------------------
 with tab1:
+
     col_a, col_b = st.columns(2)
 
+    # ---- Donut — Décisions ----
     with col_a:
         st.subheader("Répartition des décisions")
-        chart_dec = df_f[col_dec].value_counts().reset_index()
-        chart_dec.columns = ['Décision', 'Nombre']
-        st.bar_chart(chart_dec, x='Décision', y='Nombre', horizontal=True)
+        dec_counts = df_f[col_dec].value_counts().reset_index()
+        dec_counts.columns = ["Décision", "Nombre"]
+        couleurs = [couleur_decision(d) for d in dec_counts["Décision"]]
+        fig_donut = go.Figure(go.Pie(
+            labels=dec_counts["Décision"],
+            values=dec_counts["Nombre"],
+            hole=0.45,
+            marker_colors=couleurs,
+            textinfo="label+percent",
+            hovertemplate="%{label}<br>%{value} ECBU (%{percent})<extra></extra>",
+        ))
+        fig_donut.update_layout(
+            showlegend=False, margin=dict(t=10, b=10, l=10, r=10), height=300
+        )
+        st.plotly_chart(fig_donut, use_container_width=True)
 
+    # ---- Barres horizontales — Germes (top 8) ----
     with col_b:
-        st.subheader("Répartition par germe")
-        chart_germe = df_f['Bactérie'].value_counts().head(8).reset_index()
-        chart_germe.columns = ['Germe', 'Nombre']
-        st.bar_chart(chart_germe, x='Germe', y='Nombre', horizontal=True)
+        st.subheader("Germes les plus fréquents")
+        germe_counts = df_f["Bactérie"].value_counts().head(8).reset_index()
+        germe_counts.columns = ["Germe", "Nombre"]
+        fig_germe = px.bar(
+            germe_counts, x="Nombre", y="Germe", orientation="h",
+            color="Nombre", color_continuous_scale="Blues",
+            text="Nombre",
+        )
+        fig_germe.update_traces(textposition="outside")
+        fig_germe.update_layout(
+            yaxis=dict(autorange="reversed"),
+            coloraxis_showscale=False,
+            margin=dict(t=10, b=10, l=10, r=40),
+            height=300,
+        )
+        st.plotly_chart(fig_germe, use_container_width=True)
 
     col_c, col_d = st.columns(2)
+
+    # ---- Donut — Symptomatique ----
     with col_c:
         st.subheader("Symptomatique vs Asymptomatique")
-        chart_sympt = df_f['Symptomatique'].value_counts().reset_index()
-        chart_sympt.columns = ['Symptomatique', 'Nombre']
-        st.bar_chart(chart_sympt, x='Symptomatique', y='Nombre')
+        sympt_counts = df_f["Symptomatique"].value_counts().reset_index()
+        sympt_counts.columns = ["Statut", "Nombre"]
+        fig_sympt = go.Figure(go.Pie(
+            labels=sympt_counts["Statut"],
+            values=sympt_counts["Nombre"],
+            hole=0.45,
+            marker_colors=["#3498db", "#bdc3c7"],
+            textinfo="label+percent",
+            hovertemplate="%{label}<br>%{value} ECBU (%{percent})<extra></extra>",
+        ))
+        fig_sympt.update_layout(
+            showlegend=False, margin=dict(t=10, b=10, l=10, r=10), height=280
+        )
+        st.plotly_chart(fig_sympt, use_container_width=True)
 
+    # ---- Barres — Modes de prélèvement ----
     with col_d:
         st.subheader("Mode de prélèvement")
-        chart_mode = df_f['Mode Prélèvement'].value_counts().reset_index()
-        chart_mode.columns = ['Mode', 'Nombre']
-        st.bar_chart(chart_mode, x='Mode', y='Nombre', horizontal=True)
+        mode_counts = df_f["Mode Prélèvement"].value_counts().reset_index()
+        mode_counts.columns = ["Mode", "Nombre"]
+        fig_mode = px.bar(
+            mode_counts, x="Nombre", y="Mode", orientation="h",
+            color="Nombre", color_continuous_scale="Oranges",
+            text="Nombre",
+        )
+        fig_mode.update_traces(textposition="outside")
+        fig_mode.update_layout(
+            yaxis=dict(autorange="reversed"),
+            coloraxis_showscale=False,
+            margin=dict(t=10, b=10, l=10, r=40),
+            height=280,
+        )
+        st.plotly_chart(fig_mode, use_container_width=True)
 
-# ---- TAB 2 : TENDANCES TEMPORELLES ----
+# ---------------------------------------------------------------------------
+# TAB 2 — TENDANCES TEMPORELLES
+# ---------------------------------------------------------------------------
 with tab2:
     st.subheader("Évolution temporelle")
 
-    if 'Date Prélèvement' in df_f.columns and df_f['Date Prélèvement'].notna().any():
+    if "Date Prélèvement" in df_f.columns and df_f["Date Prélèvement"].notna().any():
         df_t = df_f.copy()
-        df_t['Date Prélèvement'] = pd.to_datetime(df_t['Date Prélèvement'], errors='coerce')
-        df_t['Jour'] = df_t['Date Prélèvement'].dt.date
+        df_t["Date Prélèvement"] = pd.to_datetime(df_t["Date Prélèvement"], errors="coerce")
+        df_t["Jour"] = df_t["Date Prélèvement"].dt.date
 
-        # ECBU par jour
-        par_jour = df_t.groupby('Jour').agg(
-            Total=('Jour', 'size'),
-            Non_Pertinents=(col_dec, lambda x: x.str.contains('NÉGATIF|REJET', case=False, na=False).sum())
+        par_jour = df_t.groupby("Jour").agg(
+            Total=("Jour", "size"),
+            Non_Pertinents=(col_dec, lambda x: x.str.contains(
+                "NÉGATIF|REJET", case=False, na=False).sum()),
+            Positifs=(col_dec, lambda x: x.str.contains(
+                "POSITIF", case=False, na=False).sum()),
         ).reset_index()
-        par_jour['Taux NP (%)'] = (par_jour['Non_Pertinents'] / par_jour['Total'] * 100).round(1)
+        par_jour["Taux NP (%)"] = (par_jour["Non_Pertinents"] / par_jour["Total"] * 100).round(1)
 
-        st.line_chart(par_jour.set_index('Jour')[['Total', 'Non_Pertinents']])
-        st.caption("Nombre d'ECBU (total vs non pertinents) par jour de prélèvement")
+        # Volume par jour (empilé par catégorie)
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Scatter(
+            x=par_jour["Jour"], y=par_jour["Total"],
+            name="Total", line=dict(color="#2c3e50", width=2),
+            hovertemplate="%{x}<br>Total : %{y}<extra></extra>",
+        ))
+        fig_vol.add_trace(go.Scatter(
+            x=par_jour["Jour"], y=par_jour["Positifs"],
+            name="Positifs", line=dict(color="#2ecc71", width=2),
+            hovertemplate="%{x}<br>Positifs : %{y}<extra></extra>",
+        ))
+        fig_vol.add_trace(go.Scatter(
+            x=par_jour["Jour"], y=par_jour["Non_Pertinents"],
+            name="Non pertinents", line=dict(color="#e67e22", width=2, dash="dot"),
+            hovertemplate="%{x}<br>Non pertinents : %{y}<extra></extra>",
+        ))
+        fig_vol.update_layout(
+            xaxis_title="Date", yaxis_title="Nombre d'ECBU",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            hovermode="x unified", height=350, margin=dict(t=30, b=10),
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
 
-        st.line_chart(par_jour.set_index('Jour')[['Taux NP (%)']])
-        st.caption("Taux de non-pertinence quotidien (%)")
+        # Taux de non-pertinence
+        fig_np = px.area(
+            par_jour, x="Jour", y="Taux NP (%)",
+            color_discrete_sequence=["#e74c3c"],
+            labels={"Taux NP (%)": "Taux NP (%)"},
+        )
+        fig_np.add_hline(
+            y=taux_np, line_dash="dash", line_color="#7f8c8d",
+            annotation_text=f"Moyenne {taux_np:.1f}%",
+            annotation_position="bottom right",
+        )
+        fig_np.update_layout(
+            height=280, margin=dict(t=10, b=10),
+            yaxis_title="Taux NP (%)", xaxis_title="Date",
+        )
+        st.plotly_chart(fig_np, use_container_width=True)
+
     else:
         st.info("Pas de dates de prélèvement disponibles pour les tendances.")
 
-# ---- TAB 3 : PAR SERVICE ----
+# ---------------------------------------------------------------------------
+# TAB 3 — PAR SERVICE
+# ---------------------------------------------------------------------------
 with tab3:
     st.subheader("Indicateurs par service")
-    st.dataframe(df_svc, use_container_width=True, hide_index=True)
-    st.bar_chart(df_svc.set_index('Service')[['Taux NP (%)', '% Asymptomatiques']])
 
-# ---- TAB 4 : SÉCURITÉ & ALERTES ----
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        # Tableau coloré conditionnellement
+        def coloriser_np(val):
+            if isinstance(val, (int, float)):
+                if val >= 50:
+                    return "background-color:#fde8e8; color:#c0392b; font-weight:bold"
+                if val >= 30:
+                    return "background-color:#fef3cd; color:#856404"
+                return "background-color:#d4edda; color:#155724"
+            return ""
+
+        styled = (
+            df_svc.style
+            .applymap(coloriser_np, subset=["Taux NP (%)"])
+            .format({"Taux NP (%)": "{:.1f}%", "% Asymptomatiques": "{:.1f}%"})
+            .bar(subset=["Total ECBU"], color="#d6eaf8")
+        )
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=380)
+
+    with col_right:
+        # Heatmap service × décision
+        st.subheader("Heatmap service × décision")
+        pivot = (
+            df_f.groupby(["Service", col_dec])
+            .size()
+            .reset_index(name="n")
+            .pivot(index="Service", columns=col_dec, values="n")
+            .fillna(0)
+            .astype(int)
+        )
+        fig_heat = px.imshow(
+            pivot,
+            color_continuous_scale="RdYlGn_r",
+            aspect="auto",
+            text_auto=True,
+            labels=dict(x="Décision", y="Service", color="ECBU"),
+        )
+        fig_heat.update_layout(
+            height=380, margin=dict(t=10, b=10, l=10, r=10),
+            coloraxis_showscale=False,
+            xaxis_tickangle=-30,
+        )
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+    # Barres groupées taux NP vs % asymptomatiques
+    fig_svc = px.bar(
+        df_svc.sort_values("Taux NP (%)"),
+        x="Service", y=["Taux NP (%)", "% Asymptomatiques"],
+        barmode="group",
+        color_discrete_map={"Taux NP (%)": "#e74c3c", "% Asymptomatiques": "#3498db"},
+        labels={"value": "%", "variable": "Indicateur"},
+    )
+    fig_svc.update_layout(
+        height=320, margin=dict(t=10, b=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+    )
+    st.plotly_chart(fig_svc, use_container_width=True)
+
+# ---------------------------------------------------------------------------
+# TAB 4 — SÉCURITÉ & ALERTES
+# ---------------------------------------------------------------------------
 with tab4:
     st.subheader("Indicateurs de sécurité")
 
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 
-    # ASB détectées
-    nb_asb = df_f['Recommandation'].str.contains('ASB', case=False, na=False).sum() if 'Recommandation' in df_f.columns else 0
-    col_s1.metric("ASB identifiées", nb_asb, help="Bactériuries asymptomatiques chez >75 ans")
+    nb_asb = (
+        df_f["Recommandation"].str.contains("ASB", case=False, na=False).sum()
+        if "Recommandation" in df_f.columns else 0
+    )
+    nb_decap  = df_f[col_dec].str.contains("décapitée",   case=False, na=False).sum()
+    nb_immuno = df_f[col_dec].str.contains("Immunodéprimé", case=False, na=False).sum()
+    nb_prelev_risque = (
+        (df_f["Alerte Prélèvement"] != "OK").sum()
+        if "Alerte Prélèvement" in df_f.columns else 0
+    )
 
-    # Infections décapitées
-    nb_decap = df_f[col_dec].str.contains('décapitée', case=False, na=False).sum()
-    col_s2.metric("Infections décapitées", nb_decap, help="ATB en cours + leucocyturie + culture négative")
-
-    # Immunodéprimés avec infection
-    nb_immuno = df_f[col_dec].str.contains('Immunodéprimé', case=False, na=False).sum()
-    col_s3.metric("Immunodép. infectés", nb_immuno)
-
-    # Prélèvements à risque
-    nb_prelev_risque = (df_f['Alerte Prélèvement'] != 'OK').sum() if 'Alerte Prélèvement' in df_f.columns else 0
+    col_s1.metric("ASB identifiées",       nb_asb,
+                  help="Bactériuries asymptomatiques chez >75 ans")
+    col_s2.metric("Infections décapitées", nb_decap,
+                  help="ATB en cours + leucocyturie + culture négative")
+    col_s3.metric("Immunodép. infectés",   nb_immuno)
     col_s4.metric("Prélèvements à risque", nb_prelev_risque)
 
     st.divider()
 
+    # Jauge taux NP
+    fig_gauge = go.Figure(go.Indicator(
+        mode="gauge+number+delta",
+        value=taux_np,
+        delta={"reference": 40, "increasing": {"color": "#e74c3c"},
+               "decreasing": {"color": "#2ecc71"}},
+        title={"text": "Taux de non-pertinence (%)"},
+        gauge={
+            "axis": {"range": [0, 100]},
+            "bar":  {"color": "#e74c3c" if taux_np >= 50 else
+                              "#e67e22" if taux_np >= 30 else "#2ecc71"},
+            "steps": [
+                {"range": [0,  30], "color": "#d4edda"},
+                {"range": [30, 50], "color": "#fef3cd"},
+                {"range": [50, 100], "color": "#fde8e8"},
+            ],
+            "threshold": {"line": {"color": "#7f8c8d", "width": 3},
+                          "thickness": 0.75, "value": 40},
+        },
+        number={"suffix": "%", "font": {"size": 36}},
+    ))
+    fig_gauge.update_layout(height=280, margin=dict(t=30, b=10, l=40, r=40))
+    st.plotly_chart(fig_gauge, use_container_width=True)
+
     # Détail des alertes
-    if 'Recommandation' in df_f.columns:
-        df_reco = df_f[df_f['Recommandation'].notna()][
-            ['ID Anonyme', 'Sexe', 'Age', 'Service', 'Bactérie',
-             'Symptomatique', col_dec, 'Recommandation']
-        ]
+    if "Recommandation" in df_f.columns:
+        df_reco = df_f[df_f["Recommandation"].notna()][[
+            "ID Anonyme", "Sexe", "Age", "Service", "Bactérie",
+            "Symptomatique", col_dec, "Recommandation",
+        ]]
         if not df_reco.empty:
             st.subheader("Détail des recommandations cliniques")
-            st.dataframe(df_reco, use_container_width=True, hide_index=True)
+            st.dataframe(
+                df_reco.style.applymap(
+                    lambda v: f"color:{couleur_decision(v)}; font-weight:bold",
+                    subset=[col_dec],
+                ),
+                use_container_width=True, hide_index=True,
+            )
         else:
             st.success("Aucune alerte clinique sur la sélection courante.")
 
-# ---- TAB 5 : DONNÉES BRUTES ----
+# ---------------------------------------------------------------------------
+# TAB 5 — DONNÉES BRUTES
+# ---------------------------------------------------------------------------
 with tab5:
     st.subheader("Données complètes")
-    st.dataframe(df_f, use_container_width=True, hide_index=True)
 
-    # Export CSV
-    csv = df_f.to_csv(index=False).encode('utf-8')
+    # Coloration de la colonne décision
+    styled_raw = df_f.style.applymap(
+        lambda v: f"color:{couleur_decision(v)}; font-weight:bold",
+        subset=[col_dec],
+    )
+    st.dataframe(styled_raw, use_container_width=True, hide_index=True)
+
+    csv = df_f.to_csv(index=False).encode("utf-8")
     st.download_button("Télécharger en CSV", csv, "export_ecbu.csv", "text/csv")
 
 # =============================================================================
 # FOOTER
 # =============================================================================
 st.divider()
-st.caption("SAD ECBU — Hôpital Avicenne / LIMICS | Algorithme REMIC 2022 / SPILF 2015")
+st.caption("SAD ECBU — Hôpital Avicenne / LIMICS | Algorithme REMIC 2022 / SPILF 2015 / HAS 2023")
