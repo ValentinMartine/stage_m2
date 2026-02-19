@@ -42,3 +42,9 @@ desktop.ini
 
 # Logs
 *.log
+
+# Streamlit secrets (credentials — ne JAMAIS committer)
+.streamlit/secrets.toml
+
+# Modèle ML sérialisé (binaire, potentiellement volumineux)
+modele_np.pkl

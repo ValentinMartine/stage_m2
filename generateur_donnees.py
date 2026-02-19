@@ -44,6 +44,11 @@ MODES_PRELEVEMENT = [
 # PROFILS CLINIQUES (corrélations réalistes)
 # =============================================================================
 
+def _resistance(poids: dict) -> str:
+    """Tire un profil de résistance selon des probabilités épidémiologiques."""
+    return random.choices(list(poids.keys()), weights=list(poids.values()), k=1)[0]
+
+
 def generer_profil_geriatrie_asb():
     """Femme âgée asymptomatique — bactériurie asymptomatique classique (à ne PAS traiter)."""
     return {
@@ -60,6 +65,7 @@ def generer_profil_geriatrie_asb():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 95, 'BLSE': 5}),
     }
 
 def generer_profil_iu_classique():
@@ -82,6 +88,7 @@ def generer_profil_iu_classique():
         'est_immunodeprime': False,
         'est_enceinte': (sexe == 2 and random.random() < 0.1),
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 80, 'BLSE': 18, 'Carbapenemase': 2}),
     }
 
 def generer_profil_contamination():
@@ -100,6 +107,7 @@ def generer_profil_contamination():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': 'Inconnu',
     }
 
 def generer_profil_sterile():
@@ -118,6 +126,7 @@ def generer_profil_sterile():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': 'Inconnu',
     }
 
 def generer_profil_sonde_uro():
@@ -136,6 +145,7 @@ def generer_profil_sonde_uro():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 75, 'BLSE': 20, 'Carbapenemase': 5}),
     }
 
 def generer_profil_reanimation():
@@ -155,6 +165,7 @@ def generer_profil_reanimation():
         'est_immunodeprime': immunodep,
         'est_enceinte': False,
         'antibio_en_cours': random.random() < 0.5,
+        'profil_resistance': _resistance({'Sensible': 50, 'BLSE': 30, 'Carbapenemase': 15, 'MRSA': 5}),
     }
 
 def generer_profil_homme_limite():
@@ -173,6 +184,7 @@ def generer_profil_homme_limite():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 85, 'BLSE': 15}),
     }
 
 def generer_profil_femme_seuil():
@@ -191,6 +203,7 @@ def generer_profil_femme_seuil():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 80, 'BLSE': 18, 'Carbapenemase': 2}),
     }
 
 def generer_profil_onco_immunodeprime():
@@ -209,6 +222,7 @@ def generer_profil_onco_immunodeprime():
         'est_immunodeprime': True,
         'est_enceinte': False,
         'antibio_en_cours': random.random() < 0.3,
+        'profil_resistance': _resistance({'Sensible': 65, 'BLSE': 25, 'Carbapenemase': 10}),
     }
 
 def generer_profil_infection_decapitee():
@@ -227,6 +241,7 @@ def generer_profil_infection_decapitee():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': True,
+        'profil_resistance': 'Inconnu',
     }
 
 def generer_profil_pediatrie():
@@ -248,6 +263,7 @@ def generer_profil_pediatrie():
         'est_immunodeprime': False,
         'est_enceinte': False,
         'antibio_en_cours': False,
+        'profil_resistance': _resistance({'Sensible': 90, 'BLSE': 10}),
     }
 
 
@@ -331,10 +347,80 @@ if __name__ == "__main__":
         help="Chemin vers un fichier patients.csv Synthea (démographies réelles)",
     )
     parser.add_argument(
+        "--calibrate-from-db", action="store_true",
+        help="Lire la distribution réelle depuis PostgreSQL et afficher les poids suggérés",
+    )
+    parser.add_argument(
         "--synthea-url", type=str, default=None, metavar="URL",
         help="URL pour télécharger les données démographiques Synthea",
     )
     args = parser.parse_args()
+
+    # -------------------------------------------------------------------------
+    # --calibrate-from-db : analyse la distribution réelle et affiche les poids
+    # -------------------------------------------------------------------------
+    if args.calibrate_from_db:
+        import sys as _sys
+        try:
+            from dotenv import load_dotenv as _ldenv
+            _ldenv(os.path.join(OUTPUT_DIR, ".env"))
+        except ImportError:
+            pass
+        try:
+            from sqlalchemy import create_engine as _ce
+        except ImportError:
+            print("sqlalchemy requis : pip install sqlalchemy psycopg2-binary")
+            _sys.exit(1)
+
+        _db_pass = os.getenv("DB_PASS", "")
+        if not _db_pass:
+            print("DB_PASS non défini. Vérifiez votre .env.")
+            _sys.exit(1)
+
+        _engine = _ce(
+            f"postgresql+psycopg2://{os.getenv('DB_USER','postgres')}:{_db_pass}"
+            f"@{os.getenv('DB_HOST','localhost')}:{os.getenv('DB_PORT','5432')}"
+            f"/{os.getenv('DB_NAME','postgres')}"
+        )
+        _df_dist = pd.read_sql(
+            'SELECT "Service", COUNT(*) AS n FROM v_algo_avicenne '
+            'GROUP BY "Service" ORDER BY n DESC',
+            _engine,
+        )
+        _total = _df_dist["n"].sum()
+
+        # Correspondance service → profil
+        _SVC_TO_PROFIL = {
+            "GERIATRIE_A":         "generer_profil_geriatrie_asb",
+            "URGENCES":            "generer_profil_iu_classique",
+            "MEDECINE_INTERNE":    "generer_profil_iu_classique",
+            "GASTRO_ENTERO":       "generer_profil_iu_classique",
+            "REANIMATION":         "generer_profil_reanimation",
+            "UROLOGIE_B":          "generer_profil_sonde_uro",
+            "ONCOLOGIE":           "generer_profil_onco_immunodeprime",
+            "PEDIATRIE":           "generer_profil_pediatrie",
+            "CHIRURGIE_DIGESTIVE": "generer_profil_infection_decapitee",
+            "NEPHROLOGIE":         "generer_profil_sonde_uro",
+        }
+
+        print("\nDistribution réelle par service (depuis v_algo_avicenne) :")
+        print(f"  {'Service':30s} {'N':>6}  {'%':>6}  Profil suggéré")
+        print(f"  {'─'*75}")
+        for _, _row in _df_dist.iterrows():
+            _svc   = _row["Service"]
+            _n     = _row["n"]
+            _pct   = _n / _total * 100
+            _prof  = _SVC_TO_PROFIL.get(_svc, "???")
+            print(f"  {_svc:30s} {_n:>6}  {_pct:>5.1f}%  {_prof}")
+
+        print(f"\n  Total : {_total} ECBU")
+        print("\nPoids calibrés suggérés (arrondis) :")
+        for _, _row in _df_dist.iterrows():
+            _poids = max(1, round(_row["n"] / _total * 100))
+            print(f"  ({_SVC_TO_PROFIL.get(_row['Service'], '???')}, {_poids}),")
+
+        print("\nNote : remplacez les poids dans PROFILS[] pour refléter la réalité.")
+        _sys.exit(0)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -393,6 +479,7 @@ if __name__ == "__main__":
             'EST_IMMUNODEPRIME':  int(profil['est_immunodeprime']),
             'EST_ENCEINTE':       int(profil['est_enceinte']),
             'ANTIBIO_EN_COURS':   int(profil['antibio_en_cours']),
+            'PROFIL_RESISTANCE':  profil.get('profil_resistance', 'Inconnu'),
         }
         data.append(row)
 

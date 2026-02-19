@@ -1,7 +1,7 @@
 """
 Dashboard Streamlit — Pilotage Juste Prescription ECBU
-v3 : visualisations Plotly, code couleur par décision, heatmap, donut charts,
-     tableaux conditionnels, export PDF.
+v4 : Wilson CI, authentification optionnelle, donut résistances,
+     bouton alerte email, onglet prédiction ML, export PDF.
 
 Lancement :
     python -m streamlit run dashboard.py
@@ -18,19 +18,35 @@ import streamlit as st
 from fpdf import FPDF
 from sqlalchemy import create_engine
 
+from kpis_ecbu import (
+    taux_non_pertinence,
+    compter_asb,
+    compter_infections_decapitees,
+    compter_prelev_risque,
+    stats_par_service,
+)
+
 # =============================================================================
 # PALETTE — couleurs par décision clinique
 # =============================================================================
 COULEURS_DECISION = {
-    "POSITIF":   "#2ecc71",   # vert
-    "NÉGATIF":   "#95a5a6",   # gris
-    "REJET":     "#e67e22",   # orange
-    "ALERTE":    "#e74c3c",   # rouge
-    "TRAITEMENT":"#3498db",   # bleu
+    "POSITIF":    "#2ecc71",
+    "NÉGATIF":    "#95a5a6",
+    "REJET":      "#e67e22",
+    "ALERTE":     "#e74c3c",
+    "TRAITEMENT": "#3498db",
 }
 
+COULEURS_RESISTANCE = {
+    "Sensible":      "#2ecc71",
+    "BLSE":          "#e67e22",
+    "Carbapenemase": "#e74c3c",
+    "MRSA":          "#9b59b6",
+    "Inconnu":       "#bdc3c7",
+}
+
+
 def couleur_decision(libelle: str) -> str:
-    """Retourne la couleur associée à un libellé de décision."""
     for cle, couleur in COULEURS_DECISION.items():
         if cle in str(libelle).upper():
             return couleur
@@ -72,17 +88,22 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
     pdf.set_margins(15, 18, 15)
     pdf.add_page()
 
-    # ---- KPIs ----
+    # KPIs
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 7, "Indicateurs cles", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
+    ci_str = (
+        f"{kpis['ci_low']:.1f}% - {kpis['ci_high']:.1f}%"
+        if "ci_low" in kpis else "N/A"
+    )
     kpi_rows = [
-        ("Total ECBU analyses",    str(kpis["total"])),
-        ("Positifs",               str(kpis["nb_positif"])),
-        ("Negatifs",               str(kpis["nb_negatif"])),
-        ("Rejets (contamination)", str(kpis["nb_rejet"])),
-        ("Alertes cliniques",      str(kpis["nb_alerte"])),
-        ("Taux de non-pertinence", f"{kpis['taux_np']:.1f}%"),
+        ("Total ECBU analyses",          str(kpis["total"])),
+        ("Positifs",                      str(kpis["nb_positif"])),
+        ("Negatifs",                      str(kpis["nb_negatif"])),
+        ("Rejets (contamination)",        str(kpis["nb_rejet"])),
+        ("Alertes cliniques",             str(kpis["nb_alerte"])),
+        ("Taux de non-pertinence",        f"{kpis['taux_np']:.1f}%"),
+        ("IC 95% Wilson",                 ci_str),
     ]
     cw = [110, 55]
     pdf.set_font("Helvetica", "B", 8)
@@ -97,7 +118,7 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
         pdf.cell(cw[1], 5, val,   border=1, fill=fill, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(6)
 
-    # ---- Par service ----
+    # Par service
     pdf.set_font("Helvetica", "B", 10)
     pdf.cell(0, 7, "Statistiques par service", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(1)
@@ -118,11 +139,13 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
     pdf.ln(4)
     pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(0, 5,
-             f"Donnees filtrees : {len(df_f)} ECBU | "
-             f"Periode : {df_f['Date Prelevement'].min() if 'Date Prelevement' in df_f else 'N/A'}"
-             f" - {df_f['Date Prelevement'].max() if 'Date Prelevement' in df_f else 'N/A'}",
-             new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(
+        0, 5,
+        f"Donnees filtrees : {len(df_f)} ECBU | "
+        f"Periode : {df_f['Date Prélèvement'].min() if 'Date Prélèvement' in df_f else 'N/A'}"
+        f" - {df_f['Date Prélèvement'].max() if 'Date Prélèvement' in df_f else 'N/A'}",
+        new_x="LMARGIN", new_y="NEXT",
+    )
     buf = BytesIO()
     buf.write(bytes(pdf.output()))
     return buf.getvalue()
@@ -132,7 +155,7 @@ def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) ->
 # CONNEXION
 # =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ENV_PATH = os.path.join(SCRIPT_DIR, ".env")
+ENV_PATH   = os.path.join(SCRIPT_DIR, ".env")
 
 try:
     from dotenv import load_dotenv
@@ -147,6 +170,42 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# =============================================================================
+# AUTHENTIFICATION OPTIONNELLE
+# =============================================================================
+_SECRETS_PATH = os.path.join(SCRIPT_DIR, ".streamlit", "secrets.toml")
+_auth_active  = os.path.isfile(_SECRETS_PATH) and os.path.getsize(_SECRETS_PATH) > 0
+
+if _auth_active:
+    try:
+        import streamlit_authenticator as stauth
+
+        credentials  = dict(st.secrets.get("credentials", {}))
+        cookie_conf  = dict(st.secrets.get("cookie", {}))
+        authenticator = stauth.Authenticate(
+            credentials,
+            cookie_conf.get("name", "ecbu_auth"),
+            cookie_conf.get("key", "dev_key"),
+            cookie_conf.get("expiry_days", 1),
+        )
+        authenticator.login()
+        _status = st.session_state.get("authentication_status")
+        if _status is False:
+            st.error("Identifiant ou mot de passe incorrect.")
+            st.stop()
+        elif _status is None:
+            st.warning("Veuillez vous connecter pour accéder au dashboard.")
+            st.stop()
+        else:
+            authenticator.logout(location="sidebar")
+    except Exception as _auth_err:
+        st.info(f"Authentification désactivée (mode dev) : {_auth_err}")
+else:
+    st.sidebar.caption("🔓 Mode développement — authentification désactivée")
+
+# =============================================================================
+# CHARGEMENT DES DONNÉES
+# =============================================================================
 DB_USER = os.getenv("DB_USER", "postgres")
 DB_PASS = os.getenv("DB_PASS", "")
 DB_HOST = os.getenv("DB_HOST", "localhost")
@@ -180,10 +239,10 @@ col_dec = "Décision Algorithme"
 # =============================================================================
 st.sidebar.header("🔍 Filtres")
 
-services   = sorted(df["Service"].unique())
+services       = sorted(df["Service"].unique())
 choix_services = st.sidebar.multiselect("Service(s)", services, default=services)
 
-sexes = sorted(df["Sexe"].unique())
+sexes     = sorted(df["Sexe"].unique())
 choix_sexe = st.sidebar.multiselect("Sexe", sexes, default=sexes)
 
 age_min, age_max = int(df["Age"].min()), int(df["Age"].max())
@@ -202,46 +261,70 @@ mask = (
 df_f = df[mask].copy()
 
 # =============================================================================
-# KPIs
+# KPIs — via kpis_ecbu (Wilson CI inclus)
 # =============================================================================
-total      = len(df_f)
-nb_positif = df_f[col_dec].str.contains("POSITIF",  case=False, na=False).sum()
-nb_negatif = df_f[col_dec].str.contains("NÉGATIF",  case=False, na=False).sum()
-nb_rejet   = df_f[col_dec].str.contains("REJET",    case=False, na=False).sum()
-nb_alerte  = df_f[col_dec].str.contains("ALERTE",   case=False, na=False).sum()
-nb_np      = nb_negatif + nb_rejet
-taux_np    = nb_np / total * 100 if total > 0 else 0
+kpi_tnp  = taux_non_pertinence(df_f)
+total    = kpi_tnp["total"]
+nb_np    = kpi_tnp["nb_np"]
+taux_np  = kpi_tnp["taux"]
+ci_low   = kpi_tnp["ci_low"]
+ci_high  = kpi_tnp["ci_high"]
+
+nb_positif = int(df_f[col_dec].str.contains("POSITIF",  case=False, na=False).sum())
+nb_negatif = int(df_f[col_dec].str.contains("NÉGATIF",  case=False, na=False).sum())
+nb_rejet   = int(df_f[col_dec].str.contains("REJET",    case=False, na=False).sum())
+nb_alerte  = int(df_f[col_dec].str.contains("ALERTE",   case=False, na=False).sum())
 
 # =============================================================================
 # STATS PAR SERVICE
 # =============================================================================
-stats_service = []
-for svc in sorted(df_f["Service"].unique()):
-    sub = df_f[df_f["Service"] == svc]
-    n        = len(sub)
-    n_np     = sub[col_dec].str.contains("NÉGATIF|REJET", case=False, na=False).sum()
-    n_pos    = sub[col_dec].str.contains("POSITIF",       case=False, na=False).sum()
-    n_asympt = (sub["Symptomatique"] == "Non").sum()
-    stats_service.append({
-        "Service":           svc,
-        "Total ECBU":        n,
-        "Positifs":          n_pos,
-        "Non pertinents":    n_np,
-        "Taux NP (%)":       round(n_np / n * 100, 1) if n > 0 else 0,
-        "Asymptomatiques":   n_asympt,
-        "% Asymptomatiques": round(n_asympt / n * 100, 1) if n > 0 else 0,
-    })
-df_svc = pd.DataFrame(stats_service).sort_values("Taux NP (%)", ascending=False)
+df_svc = stats_par_service(df_f)
 
-# ---- Bouton PDF ----
+# =============================================================================
+# SIDEBAR — ALERTES EMAIL
+# =============================================================================
+st.sidebar.divider()
+st.sidebar.subheader("⚠️ Alertes NP")
+
+_seuil_alerte = st.sidebar.slider(
+    "Seuil d'alerte (%)", min_value=10, max_value=80,
+    value=int(os.getenv("ALERT_NP_SEUIL", "40")), step=5,
+)
+
+if st.sidebar.button("Vérifier dépassements"):
+    from alertes import verifier_seuil_np
+    alertes = verifier_seuil_np(df_f, seuil=_seuil_alerte)
+    if alertes:
+        st.sidebar.warning(f"{len(alertes)} service(s) en dépassement :")
+        for a in alertes:
+            st.sidebar.write(f"• **{a['service']}** — {a['taux_np']:.1f}%")
+        if st.sidebar.button("Envoyer email d'alerte"):
+            from alertes import envoyer_alerte_email
+            ok = envoyer_alerte_email(alertes)
+            if ok:
+                st.sidebar.success("Email envoyé.")
+            else:
+                st.sidebar.error("Échec envoi — vérifiez les variables ALERT_* dans .env")
+    else:
+        st.sidebar.success(f"Aucun service au-dessus de {_seuil_alerte}%")
+
+# =============================================================================
+# SIDEBAR — EXPORT PDF
+# =============================================================================
 st.sidebar.divider()
 st.sidebar.subheader("Export PDF")
 if st.sidebar.button("Générer rapport PDF"):
-    kpis = {
-        "total": total, "nb_positif": nb_positif, "nb_negatif": nb_negatif,
-        "nb_rejet": nb_rejet, "nb_alerte": nb_alerte, "taux_np": taux_np,
+    kpis_dict = {
+        "total":      total,
+        "nb_positif": nb_positif,
+        "nb_negatif": nb_negatif,
+        "nb_rejet":   nb_rejet,
+        "nb_alerte":  nb_alerte,
+        "taux_np":    taux_np,
+        "ci_low":     ci_low,
+        "ci_high":    ci_high,
     }
-    pdf_bytes = generer_rapport_pdf(df_f, kpis, df_svc)
+    pdf_bytes = generer_rapport_pdf(df_f, kpis_dict, df_svc)
     st.sidebar.download_button(
         label="Télécharger le rapport",
         data=pdf_bytes,
@@ -255,27 +338,34 @@ if st.sidebar.button("Générer rapport PDF"):
 st.title("🏥 Pilotage Juste Prescription ECBU — Avicenne")
 st.caption(f"{len(df_f)} ECBU affichés sur {len(df)} au total")
 
-# ---- Barre de KPIs ----
+# Barre KPIs
 c1, c2, c3, c4, c5, c6 = st.columns(6)
-c1.metric("Total",            total)
-c2.metric("Positifs",         nb_positif,  delta=f"{nb_positif/total*100:.0f}%" if total else None)
-c3.metric("Négatifs",         nb_negatif)
-c4.metric("Rejets",           nb_rejet,    help="Contamination / flore polymorphe")
-c5.metric("Alertes",          nb_alerte,   help="Infections décapitées, cas critiques")
-c6.metric("Taux non-pertinence", f"{taux_np:.1f}%",
-          delta=f"{nb_np} ECBU", delta_color="inverse")
+c1.metric("Total",               total)
+c2.metric("Positifs",            nb_positif,
+          delta=f"{nb_positif/total*100:.0f}%" if total else None)
+c3.metric("Négatifs",            nb_negatif)
+c4.metric("Rejets",              nb_rejet,   help="Contamination / flore polymorphe")
+c5.metric("Alertes",             nb_alerte,  help="Infections décapitées, cas critiques")
+c6.metric(
+    "Taux non-pertinence",
+    f"{taux_np:.1f}%",
+    delta=f"{nb_np} ECBU",
+    delta_color="inverse",
+    help=f"IC 95% Wilson : [{ci_low:.1f}% – {ci_high:.1f}%]",
+)
 
 st.divider()
 
 # =============================================================================
 # ONGLETS
 # =============================================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "📊 Vue d'ensemble",
     "📈 Tendances",
     "🏥 Par service",
     "⚠️ Sécurité & Alertes",
     "📋 Données brutes",
+    "🤖 Prédiction NP",
 ])
 
 # ---------------------------------------------------------------------------
@@ -285,7 +375,7 @@ with tab1:
 
     col_a, col_b = st.columns(2)
 
-    # ---- Donut — Décisions ----
+    # Donut décisions
     with col_a:
         st.subheader("Répartition des décisions")
         dec_counts = df_f[col_dec].value_counts().reset_index()
@@ -304,28 +394,26 @@ with tab1:
         )
         st.plotly_chart(fig_donut, use_container_width=True)
 
-    # ---- Barres horizontales — Germes (top 8) ----
+    # Barres germes
     with col_b:
         st.subheader("Germes les plus fréquents")
         germe_counts = df_f["Bactérie"].value_counts().head(8).reset_index()
         germe_counts.columns = ["Germe", "Nombre"]
         fig_germe = px.bar(
             germe_counts, x="Nombre", y="Germe", orientation="h",
-            color="Nombre", color_continuous_scale="Blues",
-            text="Nombre",
+            color="Nombre", color_continuous_scale="Blues", text="Nombre",
         )
         fig_germe.update_traces(textposition="outside")
         fig_germe.update_layout(
             yaxis=dict(autorange="reversed"),
             coloraxis_showscale=False,
-            margin=dict(t=10, b=10, l=10, r=40),
-            height=300,
+            margin=dict(t=10, b=10, l=10, r=40), height=300,
         )
         st.plotly_chart(fig_germe, use_container_width=True)
 
     col_c, col_d = st.columns(2)
 
-    # ---- Donut — Symptomatique ----
+    # Donut symptomatique
     with col_c:
         st.subheader("Symptomatique vs Asymptomatique")
         sympt_counts = df_f["Symptomatique"].value_counts().reset_index()
@@ -343,24 +431,44 @@ with tab1:
         )
         st.plotly_chart(fig_sympt, use_container_width=True)
 
-    # ---- Barres — Modes de prélèvement ----
+    # Barres mode prélèvement
     with col_d:
         st.subheader("Mode de prélèvement")
         mode_counts = df_f["Mode Prélèvement"].value_counts().reset_index()
         mode_counts.columns = ["Mode", "Nombre"]
         fig_mode = px.bar(
             mode_counts, x="Nombre", y="Mode", orientation="h",
-            color="Nombre", color_continuous_scale="Oranges",
-            text="Nombre",
+            color="Nombre", color_continuous_scale="Oranges", text="Nombre",
         )
         fig_mode.update_traces(textposition="outside")
         fig_mode.update_layout(
             yaxis=dict(autorange="reversed"),
             coloraxis_showscale=False,
-            margin=dict(t=10, b=10, l=10, r=40),
-            height=280,
+            margin=dict(t=10, b=10, l=10, r=40), height=280,
         )
         st.plotly_chart(fig_mode, use_container_width=True)
+
+    # Donut profils de résistance (si colonne présente)
+    if "Profil Résistance" in df_f.columns:
+        st.subheader("Profils de résistance bactérienne")
+        res_counts = df_f["Profil Résistance"].value_counts().reset_index()
+        res_counts.columns = ["Profil", "Nombre"]
+        res_colors = [COULEURS_RESISTANCE.get(p, "#bdc3c7") for p in res_counts["Profil"]]
+        fig_res = go.Figure(go.Pie(
+            labels=res_counts["Profil"],
+            values=res_counts["Nombre"],
+            hole=0.45,
+            marker_colors=res_colors,
+            textinfo="label+percent",
+            hovertemplate="%{label}<br>%{value} ECBU (%{percent})<extra></extra>",
+        ))
+        fig_res.update_layout(
+            showlegend=True,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3),
+            margin=dict(t=10, b=40, l=10, r=10),
+            height=320,
+        )
+        st.plotly_chart(fig_res, use_container_width=True)
 
 # ---------------------------------------------------------------------------
 # TAB 2 — TENDANCES TEMPORELLES
@@ -382,7 +490,6 @@ with tab2:
         ).reset_index()
         par_jour["Taux NP (%)"] = (par_jour["Non_Pertinents"] / par_jour["Total"] * 100).round(1)
 
-        # Volume par jour (empilé par catégorie)
         fig_vol = go.Figure()
         fig_vol.add_trace(go.Scatter(
             x=par_jour["Jour"], y=par_jour["Total"],
@@ -406,16 +513,20 @@ with tab2:
         )
         st.plotly_chart(fig_vol, use_container_width=True)
 
-        # Taux de non-pertinence
         fig_np = px.area(
             par_jour, x="Jour", y="Taux NP (%)",
             color_discrete_sequence=["#e74c3c"],
-            labels={"Taux NP (%)": "Taux NP (%)"},
         )
         fig_np.add_hline(
             y=taux_np, line_dash="dash", line_color="#7f8c8d",
             annotation_text=f"Moyenne {taux_np:.1f}%",
             annotation_position="bottom right",
+        )
+        # IC Wilson en bande de fond
+        fig_np.add_hrect(
+            y0=ci_low, y1=ci_high, fillcolor="#e74c3c", opacity=0.08,
+            line_width=0, annotation_text=f"IC 95%",
+            annotation_position="top left",
         )
         fig_np.update_layout(
             height=280, margin=dict(t=10, b=10),
@@ -435,7 +546,6 @@ with tab3:
     col_left, col_right = st.columns([1, 1])
 
     with col_left:
-        # Tableau coloré conditionnellement
         def coloriser_np(val):
             if isinstance(val, (int, float)):
                 if val >= 50:
@@ -454,7 +564,6 @@ with tab3:
         st.dataframe(styled, use_container_width=True, hide_index=True, height=380)
 
     with col_right:
-        # Heatmap service × décision
         st.subheader("Heatmap service × décision")
         pivot = (
             df_f.groupby(["Service", col_dec])
@@ -473,12 +582,10 @@ with tab3:
         )
         fig_heat.update_layout(
             height=380, margin=dict(t=10, b=10, l=10, r=10),
-            coloraxis_showscale=False,
-            xaxis_tickangle=-30,
+            coloraxis_showscale=False, xaxis_tickangle=-30,
         )
         st.plotly_chart(fig_heat, use_container_width=True)
 
-    # Barres groupées taux NP vs % asymptomatiques
     fig_svc = px.bar(
         df_svc.sort_values("Taux NP (%)"),
         x="Service", y=["Taux NP (%)", "% Asymptomatiques"],
@@ -500,33 +607,26 @@ with tab4:
 
     col_s1, col_s2, col_s3, col_s4 = st.columns(4)
 
-    nb_asb = (
-        df_f["Recommandation"].str.contains("ASB", case=False, na=False).sum()
-        if "Recommandation" in df_f.columns else 0
-    )
-    nb_decap  = df_f[col_dec].str.contains("décapitée",   case=False, na=False).sum()
-    nb_immuno = df_f[col_dec].str.contains("Immunodéprimé", case=False, na=False).sum()
-    nb_prelev_risque = (
-        (df_f["Alerte Prélèvement"] != "OK").sum()
-        if "Alerte Prélèvement" in df_f.columns else 0
-    )
+    nb_asb_v       = compter_asb(df_f)
+    nb_decap_v     = compter_infections_decapitees(df_f)
+    nb_prelev_v    = compter_prelev_risque(df_f)
+    nb_immuno      = int(df_f[col_dec].str.contains("Immunodéprimé", case=False, na=False).sum())
 
-    col_s1.metric("ASB identifiées",       nb_asb,
+    col_s1.metric("ASB identifiées",       nb_asb_v,
                   help="Bactériuries asymptomatiques chez >75 ans")
-    col_s2.metric("Infections décapitées", nb_decap,
+    col_s2.metric("Infections décapitées", nb_decap_v,
                   help="ATB en cours + leucocyturie + culture négative")
     col_s3.metric("Immunodép. infectés",   nb_immuno)
-    col_s4.metric("Prélèvements à risque", nb_prelev_risque)
+    col_s4.metric("Prélèvements à risque", nb_prelev_v)
 
     st.divider()
 
-    # Jauge taux NP
     fig_gauge = go.Figure(go.Indicator(
         mode="gauge+number+delta",
         value=taux_np,
         delta={"reference": 40, "increasing": {"color": "#e74c3c"},
                "decreasing": {"color": "#2ecc71"}},
-        title={"text": "Taux de non-pertinence (%)"},
+        title={"text": f"Taux de non-pertinence (%) — IC 95% : [{ci_low:.1f}–{ci_high:.1f}%]"},
         gauge={
             "axis": {"range": [0, 100]},
             "bar":  {"color": "#e74c3c" if taux_np >= 50 else
@@ -544,7 +644,6 @@ with tab4:
     fig_gauge.update_layout(height=280, margin=dict(t=30, b=10, l=40, r=40))
     st.plotly_chart(fig_gauge, use_container_width=True)
 
-    # Détail des alertes
     if "Recommandation" in df_f.columns:
         df_reco = df_f[df_f["Recommandation"].notna()][[
             "ID Anonyme", "Sexe", "Age", "Service", "Bactérie",
@@ -567,19 +666,142 @@ with tab4:
 # ---------------------------------------------------------------------------
 with tab5:
     st.subheader("Données complètes")
-
-    # Coloration de la colonne décision
     styled_raw = df_f.style.applymap(
         lambda v: f"color:{couleur_decision(v)}; font-weight:bold",
         subset=[col_dec],
     )
     st.dataframe(styled_raw, use_container_width=True, hide_index=True)
-
     csv = df_f.to_csv(index=False).encode("utf-8")
     st.download_button("Télécharger en CSV", csv, "export_ecbu.csv", "text/csv")
+
+# ---------------------------------------------------------------------------
+# TAB 6 — PRÉDICTION NP (ML)
+# ---------------------------------------------------------------------------
+with tab6:
+    st.subheader("🤖 Prédiction de non-pertinence — Régression logistique")
+    st.caption(
+        "⚠️ Modèle entraîné sur données **synthétiques** — "
+        "à des fins de recherche et de démonstration uniquement. "
+        "Ne pas utiliser pour des décisions cliniques réelles."
+    )
+
+    try:
+        from modele_prediction import (
+            charger_modele, evaluer_modele,
+            preparer_features, coefficients_modele, predire_np,
+        )
+        pipeline = charger_modele()
+
+        X_eval, y_eval, colonnes = preparer_features(df_f)
+        if len(df_f) >= 20:
+            metriques = evaluer_modele(pipeline, X_eval, y_eval)
+
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                st.metric("AUC-ROC",  f"{metriques['auc']:.3f}",
+                          help="1.0 = parfait, 0.5 = aléatoire")
+                st.metric("Accuracy", f"{metriques['accuracy']:.3f}")
+
+            with col_m2:
+                cm = metriques["cm"]
+                fig_cm = px.imshow(
+                    cm, text_auto=True,
+                    labels=dict(x="Prédit", y="Réel"),
+                    x=["Pertinent", "Non pertinent"],
+                    y=["Pertinent", "Non pertinent"],
+                    color_continuous_scale="Blues",
+                )
+                fig_cm.update_layout(
+                    height=250, margin=dict(t=10, b=10),
+                    coloraxis_showscale=False,
+                )
+                st.plotly_chart(fig_cm, use_container_width=True)
+
+            # Top features
+            df_coef = coefficients_modele(pipeline, colonnes).head(10)
+            fig_coef = px.bar(
+                df_coef, x="Coefficient", y="Feature", orientation="h",
+                color="Coefficient",
+                color_continuous_scale="RdBu_r",
+                text="Coefficient",
+            )
+            fig_coef.update_traces(texttemplate="%{text:.3f}", textposition="outside")
+            fig_coef.update_layout(
+                height=320,
+                yaxis=dict(autorange="reversed"),
+                margin=dict(t=10, b=10),
+                coloraxis_showscale=False,
+                xaxis_title="Coefficient (positif → NP)",
+            )
+            st.subheader("Top 10 features prédictives")
+            st.plotly_chart(fig_coef, use_container_width=True)
+        else:
+            st.info("Sélection trop petite pour évaluer le modèle (minimum 20 ECBU).")
+
+        # Formulaire prédiction individuelle
+        st.divider()
+        st.subheader("Prédiction individuelle")
+        with st.form("form_prediction"):
+            pc1, pc2, pc3 = st.columns(3)
+            with pc1:
+                age_pred       = st.number_input("Âge", 0, 120, 65)
+                leuco_pred     = st.number_input("Leucocyturie (/mL)", 0, 1_000_000,
+                                                  0, step=1_000)
+                bact_pred      = st.number_input("Bactériurie UFC/mL", 0, 10_000_000,
+                                                  0, step=1_000)
+            with pc2:
+                sexe_pred    = st.selectbox("Sexe", ["Femme", "Homme"])
+                service_pred = st.selectbox("Service", sorted(df_f["Service"].unique()))
+                mode_pred    = st.selectbox(
+                    "Mode prélèvement", sorted(df_f["Mode Prélèvement"].unique())
+                )
+            with pc3:
+                sympt_pred  = st.checkbox("Symptomatique")
+                sonde_pred  = st.checkbox("Sondé")
+                immuno_pred = st.checkbox("Immunodéprimé")
+                enceinte_pred = st.checkbox("Enceinte")
+                atb_pred    = st.checkbox("ATB en cours")
+            submitted = st.form_submit_button("Prédire la pertinence")
+
+        if submitted:
+            patient = {
+                "Age":                 age_pred,
+                "Leucocyturie":        leuco_pred,
+                "Bactériurie UFC/mL":  bact_pred,
+                "Sexe":                sexe_pred,
+                "Service":             service_pred,
+                "Mode Prélèvement":    mode_pred,
+                "Symptomatique":       "Oui" if sympt_pred  else "Non",
+                "Sondé":               "Oui" if sonde_pred  else "Non",
+                "Immunodéprimé":       "Oui" if immuno_pred else "Non",
+                "Enceinte":            "Oui" if enceinte_pred else "Non",
+                "ATB en cours":        "Oui" if atb_pred    else "Non",
+            }
+            result = predire_np(pipeline, patient)
+            if result["prediction"] == 1:
+                st.error(
+                    f"⚠️ Prescription probablement **non pertinente** "
+                    f"(probabilité : {result['probabilite_np']:.1%})"
+                )
+            else:
+                st.success(
+                    f"✅ Prescription probablement **pertinente** "
+                    f"(probabilité NP : {result['probabilite_np']:.1%})"
+                )
+
+    except FileNotFoundError:
+        st.info(
+            "Modèle non entraîné. Lancez :\n\n"
+            "```bash\npython modele_prediction.py --evaluate\n```"
+        )
+    except Exception as _e:
+        st.warning(f"Erreur chargement modèle : {_e}")
 
 # =============================================================================
 # FOOTER
 # =============================================================================
 st.divider()
-st.caption("SAD ECBU — Hôpital Avicenne / LIMICS | Algorithme REMIC 2022 / SPILF 2015 / HAS 2023")
+st.caption(
+    "SAD ECBU — Hôpital Avicenne / LIMICS | "
+    "Algorithme REMIC 2022 / SPILF 2015 / HAS 2023"
+)

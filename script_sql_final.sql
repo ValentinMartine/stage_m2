@@ -35,7 +35,8 @@ CREATE TABLE orbis_export_brut (
     est_sonde         INTEGER DEFAULT 0, -- 1 = matériel en place (sonde/néphro)
     est_immunodeprime INTEGER DEFAULT 0, -- 1 = neutropénie / immunodépression
     est_enceinte      INTEGER DEFAULT 0, -- 1 = femme enceinte
-    antibio_en_cours  INTEGER DEFAULT 0  -- 1 = antibiothérapie avant ECBU
+    antibio_en_cours  INTEGER DEFAULT 0, -- 1 = antibiothérapie avant ECBU
+    profil_resistance VARCHAR(30) DEFAULT 'Sensible' -- Sensible / BLSE / Carbapenemase / MRSA / Inconnu
 );
 
 
@@ -70,8 +71,8 @@ WITH donnees AS (
     FROM orbis_export_brut
 )
 SELECT
-    -- Identifiant anonymisé (hash MD5 tronqué avec sel)
-    LEFT(md5(id_dossier_x99 || 'sel_avicenne_2026'), 8) AS "ID Anonyme",
+    -- Identifiant anonymisé (SHA-256 tronqué avec sel long — PostgreSQL ≥ 11 natif)
+    LEFT(encode(sha256((id_dossier_x99 || 'sel_avicenne_2026_ecbu_avicenne_limics')::bytea), 'hex'), 16) AS "ID Anonyme",
 
     -- Démographie
     CASE
@@ -99,6 +100,7 @@ SELECT
     CASE WHEN est_immunodeprime = 1 THEN 'Oui' ELSE 'Non' END AS "Immunodéprimé",
     CASE WHEN est_enceinte = 1      THEN 'Oui' ELSE 'Non' END AS "Enceinte",
     CASE WHEN antibio_en_cours = 1  THEN 'Oui' ELSE 'Non' END AS "ATB en cours",
+    profil_resistance                                           AS "Profil Résistance",
 
     -- =========================================================================
     -- ALGORITHME DÉCISIONNEL

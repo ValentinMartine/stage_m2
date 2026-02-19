@@ -20,6 +20,8 @@ import os
 import sys
 import pandas as pd
 from sqlalchemy import create_engine, text
+from kpis_ecbu import taux_non_pertinence, compter_asb, compter_infections_decapitees, \
+    compter_prelev_risque, stats_par_service
 
 # =============================================================================
 # CONFIGURATION — Credentials depuis .env ou variables d'environnement
@@ -71,6 +73,7 @@ MAPPING_COLONNES = {
     'EST_IMMUNODEPRIME': 'est_immunodeprime',
     'EST_ENCEINTE':      'est_enceinte',
     'ANTIBIO_EN_COURS':  'antibio_en_cours',
+    'PROFIL_RESISTANCE': 'profil_resistance',
 }
 
 
@@ -129,9 +132,8 @@ def etape_analyse(engine):
         print("  Aucune donnée dans la vue. Vérifiez l'import.")
         return
 
-    # --- KPI 1 : Répartition des décisions ---
     col_decision = "Décision Algorithme"
-    repartition = df[col_decision].value_counts()
+    repartition  = df[col_decision].value_counts()
 
     print(f"\n  Total ECBU analysés : {total}")
     print(f"\n  Répartition des décisions :")
@@ -139,38 +141,27 @@ def etape_analyse(engine):
         pct = count / total * 100
         print(f"    {decision:55s} : {count:4d}  ({pct:5.1f}%)")
 
-    # --- KPI 2 : Taux de non-pertinence ---
-    masque_np = df[col_decision].str.contains('NÉGATIF|REJET', case=False, na=False)
-    nb_np = masque_np.sum()
-    taux_np = nb_np / total * 100
+    # --- KPIs via kpis_ecbu ---
+    tnp    = taux_non_pertinence(df)
+    nb_asb = compter_asb(df)
+    nb_dec = compter_infections_decapitees(df)
+    nb_ris = compter_prelev_risque(df)
+
     print(f"\n  {'─'*50}")
-    print(f"  Non pertinents (NÉGATIF + REJET) : {nb_np} / {total}")
-    print(f"  TAUX DE NON-PERTINENCE           : {taux_np:.1f}%")
+    print(f"  Non pertinents (NÉGATIF + REJET) : {tnp['nb_np']} / {tnp['total']}")
+    print(f"  TAUX DE NON-PERTINENCE           : {tnp['taux']:.1f}%")
+    print(f"  IC 95% Wilson                    : [{tnp['ci_low']:.1f}% – {tnp['ci_high']:.1f}%]")
     print(f"  {'─'*50}")
+    print(f"\n  Bactériuries asymptomatiques (ASB) identifiées  : {nb_asb}")
+    print(f"  Prélèvements à risque de contamination          : {nb_ris}")
+    print(f"  Alertes infection décapitée (ATB + leucocyturie): {nb_dec}")
 
-    # --- KPI 3 : ASB détectées ---
-    masque_asb = df['Recommandation'].str.contains('ASB', case=False, na=False)
-    nb_asb = masque_asb.sum()
-    print(f"\n  Bactériuries asymptomatiques (ASB) identifiées : {nb_asb}")
-
-    # --- KPI 4 : Alertes prélèvement ---
-    masque_alert = df['Alerte Prélèvement'] != 'OK'
-    nb_alert = masque_alert.sum()
-    print(f"  Prélèvements à risque de contamination         : {nb_alert}")
-
-    # --- KPI 5 : Infections décapitées ---
-    masque_decap = df[col_decision].str.contains('décapitée', case=False, na=False)
-    nb_decap = masque_decap.sum()
-    print(f"  Alertes infection décapitée (ATB + leucocyturie): {nb_decap}")
-
-    # --- KPI 6 : Par service ---
+    # --- Par service ---
+    df_svc = stats_par_service(df)
     print(f"\n  Taux de non-pertinence par service :")
-    for service in sorted(df['Service'].unique()):
-        sub = df[df['Service'] == service]
-        n_tot = len(sub)
-        n_np = sub[col_decision].str.contains('NÉGATIF|REJET', case=False, na=False).sum()
-        pct = n_np / n_tot * 100 if n_tot > 0 else 0
-        print(f"    {service:25s} : {n_np:3d}/{n_tot:3d}  ({pct:5.1f}%)")
+    for _, row in df_svc.iterrows():
+        print(f"    {row['Service']:25s} : {row['Non pertinents']:3d}/{row['Total ECBU']:3d}"
+              f"  ({row['Taux NP (%)']:5.1f}%)")
 
     return df
 

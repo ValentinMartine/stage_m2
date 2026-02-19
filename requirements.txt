@@ -15,6 +15,10 @@ statsmodels>=0.14
 # Export PDF
 fpdf2>=2.7
 
+# Authentification & ML
+streamlit-authenticator>=0.3
+scikit-learn>=1.4
+
 # Tests
 pytest>=8.0
 pytest-cov>=5.0

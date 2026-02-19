@@ -33,6 +33,7 @@ CHAMPS_PROFIL = {
     'sexe', 'cat_age', 'service', 'symptomes', 'germe', 'quantite',
     'leucocyturie', 'mode_prelevement', 'nb_especes', 'est_sonde',
     'est_immunodeprime', 'est_enceinte', 'antibio_en_cours',
+    'profil_resistance',
 }
 
 
