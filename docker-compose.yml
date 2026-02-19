@@ -1,0 +1,39 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+      POSTGRES_DB: ${DB_NAME:-ecbu_db}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Initialisation automatique du schéma au premier démarrage
+      - ./script_sql_final.sql:/docker-entrypoint-initdb.d/10_schema.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-ecbu_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      # Surcharge DB_HOST pour pointer vers le service 'db' interne
+      DB_HOST: db
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Montage du dossier local pour le rechargement à chaud en développement
+      - .:/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

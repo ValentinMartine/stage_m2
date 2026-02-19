@@ -8,10 +8,113 @@ Lancement :
 """
 
 import os
+from datetime import datetime
+from io import BytesIO
+
 import streamlit as st
 import pandas as pd
+from fpdf import FPDF
 from sqlalchemy import create_engine
 
+# =============================================================================
+# EXPORT PDF
+# =============================================================================
+
+def generer_rapport_pdf(df_f: pd.DataFrame, kpis: dict, df_svc: pd.DataFrame) -> bytes:
+    """Génère un rapport PDF de pilotage ECBU avec KPIs et stats par service."""
+
+    class _PDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 13)
+            self.cell(0, 8, "Rapport de Pilotage ECBU - Hopital Avicenne",
+                      align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_font("Helvetica", "", 8)
+            self.set_text_color(120, 120, 120)
+            self.cell(
+                0, 5,
+                f"Genere le {datetime.now().strftime('%d/%m/%Y a %H:%M')} | "
+                f"Algorithme REMIC 2022 / SPILF 2015 / HAS 2023",
+                align="C", new_x="LMARGIN", new_y="NEXT",
+            )
+            self.set_text_color(0, 0, 0)
+            self.ln(2)
+            self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+            self.ln(4)
+
+        def footer(self):
+            self.set_y(-14)
+            self.set_font("Helvetica", "I", 7)
+            self.set_text_color(150, 150, 150)
+            self.cell(0, 8, f"SAD ECBU - LIMICS | Page {self.page_no()}", align="C")
+
+    pdf = _PDF()
+    pdf.set_margins(15, 18, 15)
+    pdf.add_page()
+
+    # ---- Section KPIs ----
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Indicateurs cles", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1)
+
+    kpi_rows = [
+        ("Total ECBU analyses",        str(kpis["total"])),
+        ("Positifs",                   str(kpis["nb_positif"])),
+        ("Negatifs",                   str(kpis["nb_negatif"])),
+        ("Rejets (contamination)",     str(kpis["nb_rejet"])),
+        ("Alertes cliniques",          str(kpis["nb_alerte"])),
+        ("Taux de non-pertinence",     f"{kpis['taux_np']:.1f}%"),
+    ]
+    cw = [110, 55]
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(220, 235, 255)
+    pdf.cell(cw[0], 6, "Indicateur", border=1, fill=True)
+    pdf.cell(cw[1], 6, "Valeur", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 8)
+    for idx, (label, val) in enumerate(kpi_rows):
+        fill = idx % 2 == 0
+        pdf.set_fill_color(245, 249, 255) if fill else pdf.set_fill_color(255, 255, 255)
+        pdf.cell(cw[0], 5, label, border=1, fill=fill)
+        pdf.cell(cw[1], 5, val,   border=1, fill=fill, new_x="LMARGIN", new_y="NEXT")
+
+    pdf.ln(6)
+
+    # ---- Section par service ----
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 7, "Statistiques par service", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(1)
+
+    cols_svc   = ["Service", "Total ECBU", "Positifs", "Non pertinents", "Taux NP (%)"]
+    widths_svc = [55, 26, 26, 36, 26]
+
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.set_fill_color(220, 235, 255)
+    for col, w in zip(cols_svc, widths_svc):
+        pdf.cell(w, 6, col, border=1, fill=True, align="C")
+    pdf.ln()
+
+    pdf.set_font("Helvetica", "", 8)
+    for idx, row in enumerate(df_svc[cols_svc].itertuples(index=False)):
+        fill = idx % 2 == 0
+        pdf.set_fill_color(245, 249, 255) if fill else pdf.set_fill_color(255, 255, 255)
+        for val, w in zip(row, widths_svc):
+            pdf.cell(w, 5, str(val), border=1, fill=fill, align="C")
+        pdf.ln()
+
+    pdf.ln(4)
+    pdf.set_font("Helvetica", "I", 7)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 5,
+             f"Donnees filtrees : {len(df_f)} ECBU | "
+             f"Periode : {df_f['Date Prelevement'].min() if 'Date Prelevement' in df_f else 'N/A'}"
+             f" - {df_f['Date Prelevement'].max() if 'Date Prelevement' in df_f else 'N/A'}",
+             new_x="LMARGIN", new_y="NEXT")
+
+    buf = BytesIO()
+    buf.write(bytes(pdf.output()))
+    return buf.getvalue()
+
+
+# =============================================================================
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_PATH = os.path.join(SCRIPT_DIR, '.env')
 
@@ -112,6 +215,43 @@ c5.metric("Taux non-pertinence", f"{taux_np:.1f}%", delta=f"{nb_np} ECBU",
 st.divider()
 
 # =============================================================================
+# STATS PAR SERVICE (calculées ici pour les onglets et le PDF)
+# =============================================================================
+stats_service = []
+for svc in sorted(df_f['Service'].unique()):
+    sub = df_f[df_f['Service'] == svc]
+    n = len(sub)
+    n_np  = sub[col_dec].str.contains('NÉGATIF|REJET', case=False, na=False).sum()
+    n_pos = sub[col_dec].str.contains('POSITIF', case=False, na=False).sum()
+    n_asympt = (sub['Symptomatique'] == 'Non').sum()
+    stats_service.append({
+        'Service':            svc,
+        'Total ECBU':         n,
+        'Positifs':           n_pos,
+        'Non pertinents':     n_np,
+        'Taux NP (%)':        round(n_np / n * 100, 1) if n > 0 else 0,
+        'Asymptomatiques':    n_asympt,
+        '% Asymptomatiques':  round(n_asympt / n * 100, 1) if n > 0 else 0,
+    })
+df_svc = pd.DataFrame(stats_service).sort_values('Taux NP (%)', ascending=False)
+
+# ---- Bouton PDF dans la sidebar ----
+st.sidebar.divider()
+st.sidebar.subheader("Export PDF")
+if st.sidebar.button("Générer rapport PDF"):
+    kpis = {
+        'total': total, 'nb_positif': nb_positif, 'nb_negatif': nb_negatif,
+        'nb_rejet': nb_rejet, 'nb_alerte': nb_alerte, 'taux_np': taux_np,
+    }
+    pdf_bytes = generer_rapport_pdf(df_f, kpis, df_svc)
+    st.sidebar.download_button(
+        label="Télécharger le rapport",
+        data=pdf_bytes,
+        file_name=f"rapport_ecbu_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+        mime="application/pdf",
+    )
+
+# =============================================================================
 # ONGLETS
 # =============================================================================
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -178,27 +318,7 @@ with tab2:
 # ---- TAB 3 : PAR SERVICE ----
 with tab3:
     st.subheader("Indicateurs par service")
-
-    stats_service = []
-    for svc in sorted(df_f['Service'].unique()):
-        sub = df_f[df_f['Service'] == svc]
-        n = len(sub)
-        n_np = sub[col_dec].str.contains('NÉGATIF|REJET', case=False, na=False).sum()
-        n_pos = sub[col_dec].str.contains('POSITIF', case=False, na=False).sum()
-        n_asympt = (sub['Symptomatique'] == 'Non').sum()
-        stats_service.append({
-            'Service': svc,
-            'Total ECBU': n,
-            'Positifs': n_pos,
-            'Non pertinents': n_np,
-            'Taux NP (%)': round(n_np / n * 100, 1) if n > 0 else 0,
-            'Asymptomatiques': n_asympt,
-            '% Asymptomatiques': round(n_asympt / n * 100, 1) if n > 0 else 0,
-        })
-
-    df_svc = pd.DataFrame(stats_service).sort_values('Taux NP (%)', ascending=False)
     st.dataframe(df_svc, use_container_width=True, hide_index=True)
-
     st.bar_chart(df_svc.set_index('Service')[['Taux NP (%)', '% Asymptomatiques']])
 
 # ---- TAB 4 : SÉCURITÉ & ALERTES ----

@@ -307,16 +307,74 @@ def formater_quantite(q):
 # =============================================================================
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Générateur de données ECBU simulées",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--n", type=int, default=NOMBRE_ECBU, metavar="N",
+        help="Nombre d'ECBU à générer",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Graine aléatoire pour la reproductibilité",
+    )
+    parser.add_argument(
+        "--output", type=str, default=os.path.join(OUTPUT_DIR, FILENAME),
+        metavar="FICHIER",
+        help="Chemin du fichier Excel de sortie",
+    )
+    parser.add_argument(
+        "--synthea", type=str, default=None, metavar="CSV",
+        help="Chemin vers un fichier patients.csv Synthea (démographies réelles)",
+    )
+    parser.add_argument(
+        "--synthea-url", type=str, default=None, metavar="URL",
+        help="URL pour télécharger les données démographiques Synthea",
+    )
+    args = parser.parse_args()
+
+    if args.seed is not None:
+        random.seed(args.seed)
+        print(f"Graine aléatoire : {args.seed}")
+
+    # -------------------------------------------------------------------------
+    # Chargement optionnel des démographies Synthea
+    # -------------------------------------------------------------------------
+    synthea_df = None
+    if args.synthea:
+        from synthea_integration import charger_patients_synthea
+        synthea_df = charger_patients_synthea(args.synthea)
+    elif args.synthea_url:
+        from synthea_integration import telecharger_patients_synthea
+        synthea_df = telecharger_patients_synthea(url=args.synthea_url)
+
+    if synthea_df is not None:
+        from synthea_integration import mapper_demographics
+        print(f"[Synthea] Démographies actives ({len(synthea_df)} patients disponibles)")
+
+    # -------------------------------------------------------------------------
+    # Génération
+    # -------------------------------------------------------------------------
     fonctions, poids = zip(*PROFILS)
-
     data = []
-    print(f"Fabrication de {NOMBRE_ECBU} ECBU simulés (profils corrélés)...")
+    print(f"Fabrication de {args.n} ECBU simulés (profils corrélés)...")
 
-    for i in range(1, NOMBRE_ECBU + 1):
+    for i in range(1, args.n + 1):
         fn = random.choices(fonctions, weights=poids, k=1)[0]
         profil = fn()
 
-        ddn = generer_date_naissance(profil['cat_age'])
+        if synthea_df is not None:
+            patient = synthea_df.iloc[(i - 1) % len(synthea_df)]
+            demo = mapper_demographics(patient)
+            ddn = demo["ddn"]
+            profil["sexe"] = demo["sexe"]
+            profil["cat_age"] = demo["cat_age"]
+        else:
+            ddn = generer_date_naissance(profil["cat_age"])
+
         date_prelev = generer_date_prelevement()
 
         row = {
@@ -342,7 +400,7 @@ if __name__ == "__main__":
     # EXPORT
     # =========================================================================
     df = pd.DataFrame(data)
-    path = os.path.join(OUTPUT_DIR, FILENAME)
+    path = args.output
 
     try:
         df.to_excel(path, index=False)
