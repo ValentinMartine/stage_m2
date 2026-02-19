@@ -26,11 +26,13 @@ jobs:
             --exclude ./.venv,./venv \
             --severity-level medium \
             --confidence-level medium \
-            -f json -o bandit-report.json || true
+            --exit-zero \
+            -f json -o bandit-report.json
           bandit -r . \
             --exclude ./.venv,./venv \
             --severity-level medium \
-            --confidence-level medium
+            --confidence-level medium \
+            --exit-zero
 
       - name: Upload security report
         if: always()

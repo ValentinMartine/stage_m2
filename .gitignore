@@ -6,6 +6,8 @@
 *.xlsx
 *.xls
 *.csv
+# Exception : agrégats anonymisés produits par anonymiser_donnees.py (safe pour GitHub)
+!donnees_anonymes.csv
 
 # Python
 __pycache__/

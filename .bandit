@@ -1,0 +1,11 @@
+# Configuration Bandit — exclusions documentées
+#
+# B311 — random: le module random est utilisé intentionnellement pour la
+#         génération de données synthétiques (generateur_donnees.py).
+#         Il ne sert pas à des fins cryptographiques.
+#
+# B310 — urllib urlopen: utilisé dans synthea_integration.py pour
+#         télécharger un fichier CSV public depuis GitHub (HTTPS uniquement).
+#         L'URL est connue et contrôlée.
+
+skips: [B311, B310]
