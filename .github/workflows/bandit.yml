@@ -1,0 +1,40 @@
+name: Bandit — Sécurité
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Bandit
+        run: pip install bandit
+
+      - name: Run Bandit
+        run: |
+          bandit -r . \
+            --exclude ./.venv,./venv \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json -o bandit-report.json || true
+          bandit -r . \
+            --exclude ./.venv,./venv \
+            --severity-level medium \
+            --confidence-level medium
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json

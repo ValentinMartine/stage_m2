@@ -270,6 +270,7 @@ PROFILS = [
 # UTILITAIRES
 # =============================================================================
 
+
 def generer_ipp(index):
     return f"800{str(index).zfill(5)}"
 
@@ -305,55 +306,56 @@ def formater_quantite(q):
 # GÉNÉRATION
 # =============================================================================
 
-fonctions, poids = zip(*PROFILS)
+if __name__ == "__main__":
+    fonctions, poids = zip(*PROFILS)
 
-data = []
-print(f"Fabrication de {NOMBRE_ECBU} ECBU simulés (profils corrélés)...")
+    data = []
+    print(f"Fabrication de {NOMBRE_ECBU} ECBU simulés (profils corrélés)...")
 
-for i in range(1, NOMBRE_ECBU + 1):
-    fn = random.choices(fonctions, weights=poids, k=1)[0]
-    profil = fn()
+    for i in range(1, NOMBRE_ECBU + 1):
+        fn = random.choices(fonctions, weights=poids, k=1)[0]
+        profil = fn()
 
-    ddn = generer_date_naissance(profil['cat_age'])
-    date_prelev = generer_date_prelevement()
+        ddn = generer_date_naissance(profil['cat_age'])
+        date_prelev = generer_date_prelevement()
 
-    row = {
-        'NUM_IPP':            generer_ipp(i),
-        'DT_NAISS':           ddn.strftime("%d/%m/%Y"),
-        'CD_SEXE':            profil['sexe'],
-        'UF_EXEC':            profil['service'],
-        'DT_PRELEVEMENT':     date_prelev.strftime("%d/%m/%Y %H:%M"),
-        'MODE_PRELEVEMENT':   profil['mode_prelevement'],
-        'LEUCOCYTURIE':       profil['leucocyturie'],
-        'RES_VAL':            formater_quantite(profil['quantite']),
-        'GERME_NOM':          profil['germe'],
-        'NB_ESPECES':         profil['nb_especes'],
-        'SYMPTOMES':          profil['symptomes'],
-        'EST_SONDE':          int(profil['est_sonde']),
-        'EST_IMMUNODEPRIME':  int(profil['est_immunodeprime']),
-        'EST_ENCEINTE':       int(profil['est_enceinte']),
-        'ANTIBIO_EN_COURS':   int(profil['antibio_en_cours']),
-    }
-    data.append(row)
+        row = {
+            'NUM_IPP':            generer_ipp(i),
+            'DT_NAISS':           ddn.strftime("%d/%m/%Y"),
+            'CD_SEXE':            profil['sexe'],
+            'UF_EXEC':            profil['service'],
+            'DT_PRELEVEMENT':     date_prelev.strftime("%d/%m/%Y %H:%M"),
+            'MODE_PRELEVEMENT':   profil['mode_prelevement'],
+            'LEUCOCYTURIE':       profil['leucocyturie'],
+            'RES_VAL':            formater_quantite(profil['quantite']),
+            'GERME_NOM':          profil['germe'],
+            'NB_ESPECES':         profil['nb_especes'],
+            'SYMPTOMES':          profil['symptomes'],
+            'EST_SONDE':          int(profil['est_sonde']),
+            'EST_IMMUNODEPRIME':  int(profil['est_immunodeprime']),
+            'EST_ENCEINTE':       int(profil['est_enceinte']),
+            'ANTIBIO_EN_COURS':   int(profil['antibio_en_cours']),
+        }
+        data.append(row)
 
-# =============================================================================
-# EXPORT
-# =============================================================================
-df = pd.DataFrame(data)
-path = os.path.join(OUTPUT_DIR, FILENAME)
+    # =========================================================================
+    # EXPORT
+    # =========================================================================
+    df = pd.DataFrame(data)
+    path = os.path.join(OUTPUT_DIR, FILENAME)
 
-try:
-    df.to_excel(path, index=False)
-    print(f"Fichier créé : {path}")
-    print(f"  → {len(df)} lignes, {len(df.columns)} colonnes")
-except Exception as e:
-    print(f"Erreur : {e}")
+    try:
+        df.to_excel(path, index=False)
+        print(f"Fichier créé : {path}")
+        print(f"  → {len(df)} lignes, {len(df.columns)} colonnes")
+    except Exception as e:
+        print(f"Erreur : {e}")
 
-# Résumé des profils générés
-print("\nRépartition par service :")
-print(df['UF_EXEC'].value_counts().to_string())
-print(f"\nTaux symptomatiques : {df['SYMPTOMES'].mean()*100:.0f}%")
-print(f"Taux sondés         : {df['EST_SONDE'].mean()*100:.0f}%")
-print(f"Taux immunodéprimés : {df['EST_IMMUNODEPRIME'].mean()*100:.0f}%")
-print(f"\nAperçu :")
-print(df.head(10).to_string(index=False))
+    # Résumé des profils générés
+    print("\nRépartition par service :")
+    print(df['UF_EXEC'].value_counts().to_string())
+    print(f"\nTaux symptomatiques : {df['SYMPTOMES'].mean()*100:.0f}%")
+    print(f"Taux sondés         : {df['EST_SONDE'].mean()*100:.0f}%")
+    print(f"Taux immunodéprimés : {df['EST_IMMUNODEPRIME'].mean()*100:.0f}%")
+    print(f"\nAperçu :")
+    print(df.head(10).to_string(index=False))

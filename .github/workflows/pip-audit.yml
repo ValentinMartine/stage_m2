@@ -1,0 +1,36 @@
+name: pip-audit — Vulnérabilités dépendances
+
+on:
+  push:
+    branches: ["master"]
+  pull_request:
+    branches: ["master"]
+  schedule:
+    # Vérification hebdomadaire (lundi 8h UTC)
+    - cron: "0 8 * * 1"
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies & pip-audit
+        run: |
+          pip install pandas sqlalchemy openpyxl streamlit python-dotenv statsmodels
+          pip install pip-audit
+
+      - name: Run pip-audit
+        run: pip-audit --output=json --output-file=audit-report.json || pip-audit
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: audit-report.json
